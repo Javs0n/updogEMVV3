@@ -1,0 +1,202 @@
+struct UMVSearchView: View {
+    @Binding var outlets: [Outlet]
+    @State private var url = ""
+    @State private var isLoading = false
+    @State private var errorMessage = ""
+    @State private var visits: String = ""
+    @State private var countryData: [(country: String, share: Double)] = []
+    @State private var sourceData: [(source: String, share: Double)] = []
+
+    let similarWebAPIKey = "0553c631b2b9469ebd2272bd20205eb0"
+
+    var body: some View {
+        NavigationView {
+            VStack {
+                if let updogLogo = UIImage(named: "UpdogLogo") {
+                    Image(uiImage: updogLogo)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 200)
+                        .padding(.top)
+                } else {
+                    Text("Logo not found")
+                        .foregroundColor(.red)
+                }
+                
+                Form {
+                    Section(header: Text("Enter Outlet URL")) {
+                        TextField("Outlet URL", text: $url)
+                            .padding()
+                            .background(Color.orange.opacity(0.1))
+                            .cornerRadius(8)
+                        
+                        if isLoading {
+                            ProgressView("Estimating UMV data...")
+                                .padding()
+                        } else {
+                            Button(action: estimateUMVData) {
+                                Text("Estimate UMV Data")
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.orange)
+                                    .cornerRadius(8)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+
+                        if !errorMessage.isEmpty {
+                            Text(errorMessage)
+                                .foregroundColor(.red)
+                                .font(.footnote)
+                                .padding()
+                        }
+
+                        Text("Note: Estimated Unique Monthly Visitors are up-to-date as of June 2024.")
+                            .font(.footnote)
+                            .foregroundColor(.gray)
+                            .padding()
+                    }
+                    
+                    if !visits.isEmpty {
+                        Section(header: Text("SimilarWeb Data")) {
+                            Text("Estimated Visits: \(visits)")
+                                .foregroundColor(.green)
+                                .padding()
+                            
+                            Text("Country Data")
+                                .font(.headline)
+                                .padding(.top)
+                            
+                            ForEach(countryData, id: \.country) { data in
+                                HStack {
+                                    Text(data.country)
+                                    Spacer()
+                                    Text("\(data.share, specifier: "%.2f")%")
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            
+                            Text("Source Data")
+                                .font(.headline)
+                                .padding(.top)
+                            
+                            ForEach(sourceData, id: \.source) { data in
+                                HStack {
+                                    Text(data.source)
+                                    Spacer()
+                                    Text("\(data.share, specifier: "%.2f")%")
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
+                }
+
+                List {
+                    ForEach(outlets) { outlet in
+                        VStack(alignment: .leading) {
+                            Text("Name: \(outlet.name)")
+                            Text("Vertical: \(outlet.vertical)")
+                            Text("UMVs: \(outlet.umvs)")
+                            Text("Quality Score: \(outlet.qualityScore)")
+                            Text("URL: \(outlet.url)")
+                        }
+                    }
+                    .onDelete(perform: deleteOutlet)
+                }
+                .listStyle(PlainListStyle())
+                .navigationTitle("UMV Search")
+                .navigationBarHidden(true)
+            }
+        }
+    }
+
+    func estimateUMVData() {
+        guard !url.isEmpty else {
+            errorMessage = "Outlet URL cannot be empty"
+            return
+        }
+
+        isLoading = true
+        errorMessage = ""
+
+        fetchUMVs(from: url) { result in
+            DispatchQueue.main.async {
+                self.isLoading = false
+                switch result {
+                case .success(let data):
+                    self.visits = data.visits
+                    self.countryData = data.countryData
+                    self.sourceData = data.sourceData
+                    self.errorMessage = ""
+                case .failure(let error):
+                    self.errorMessage = error.localizedDescription
+                    self.visits = ""
+                    self.countryData = []
+                    self.sourceData = []
+                }
+            }
+        }
+    }
+
+    func fetchUMVs(from url: String, completion: @escaping (Result<(visits: String, countryData: [(country: String, share: Double)], sourceData: [(source: String, share: Double)]), Error>) -> Void) {
+        let encodedURL = url.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? ""
+        guard let apiUrl = URL(string: "https://api.similarweb.com/v1/website/\(encodedURL)/total-traffic-and-engagement/visits?api_key=\(similarWebAPIKey)") else {
+            completion(.failure(NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])))
+            return
+        }
+
+        var request = URLRequest(url: apiUrl)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let data = data else {
+                completion(.failure(NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "No data received"])))
+                return
+            }
+
+            do {
+                // Print the raw response for debugging
+                if let jsonString = String(data: data, encoding: .utf8) {
+                    print("Raw JSON response: \(jsonString)")
+                }
+
+                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                   let visits = json["visits"] as? Double {
+                    let formattedVisits = formatNumber(visits)
+                    completion(.success((visits: formattedVisits, countryData: [], sourceData: [])))
+                } else {
+                    completion(.failure(NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Required keys are missing or have incorrect types"])))
+                }
+            } catch {
+                completion(.failure(error))
+            }
+        }
+
+        task.resume()
+    }
+
+    func deleteOutlet(at offsets: IndexSet) {
+        outlets.remove(atOffsets: offsets)
+        saveOutlets()
+    }
+
+    func saveOutlets() {
+        if let encoded = try? JSONEncoder().encode(outlets) {
+            UserDefaults.standard.set(encoded, forKey: "outlets")
+        }
+    }
+
+    func formatNumber(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
